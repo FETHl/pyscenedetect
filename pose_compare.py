@@ -35,7 +35,7 @@ except ImportError:
     pass
 
 # Current timestamp and user
-CURRENT_TIMESTAMP = "2025-04-28 12:02:00"
+CURRENT_TIMESTAMP = "2025-04-28 12:27:36"
 CURRENT_USER = "FETHl"
 
 
@@ -67,10 +67,13 @@ def get_all_poses_mediapipe(image: np.ndarray) -> List[dict]:
                 'z': landmark.z,
                 'visibility': landmark.visibility
             })
+        bbox = estimate_bbox_from_landmarks(landmarks, image.shape[1], image.shape[0])
+        position = get_position_in_image(bbox, image.shape[1], image.shape[0])
         all_poses.append({
             'landmarks': landmarks,
-            'bbox': estimate_bbox_from_landmarks(landmarks, image.shape[1], image.shape[0]),
-            'confidence': np.mean([lm['visibility'] for lm in landmarks if 'visibility' in lm])
+            'bbox': bbox,
+            'confidence': np.mean([lm['visibility'] for lm in landmarks if 'visibility' in lm]),
+            'position': position
         })
     
     return all_poses
@@ -117,6 +120,9 @@ def get_all_poses_yolo(image: np.ndarray, pose_model) -> List[dict]:
                 bbox = [min(x_coords), min(y_coords), max(x_coords), max(y_coords)]
                 confidence = np.mean([kpt[2] for kpt in kpts])
             
+            # Get position in image
+            position = get_position_in_image(bbox, w, h)
+            
             # Convert keypoints to our standardized format
             landmarks = []
             for j, kpt in enumerate(kpts):
@@ -132,10 +138,51 @@ def get_all_poses_yolo(image: np.ndarray, pose_model) -> List[dict]:
             all_poses.append({
                 'landmarks': landmarks,
                 'bbox': [float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])],
-                'confidence': float(confidence)
+                'confidence': float(confidence),
+                'position': position
             })
     
     return all_poses
+
+
+def get_position_in_image(bbox, img_width, img_height):
+    """
+    Determine the position of a bounding box in the image.
+    
+    Args:
+        bbox: [x1, y1, x2, y2] bounding box
+        img_width: Image width
+        img_height: Image height
+        
+    Returns:
+        Position description (e.g., "top-left", "center", etc.)
+    """
+    # Get center coordinates of the bbox
+    x1, y1, x2, y2 = bbox
+    center_x = (x1 + x2) / 2
+    center_y = (y1 + y2) / 2
+    
+    # Determine horizontal position
+    if center_x < img_width / 3:
+        h_pos = "gauche"
+    elif center_x < 2 * img_width / 3:
+        h_pos = "centre"
+    else:
+        h_pos = "droite"
+    
+    # Determine vertical position
+    if center_y < img_height / 3:
+        v_pos = "haut"
+    elif center_y < 2 * img_height / 3:
+        v_pos = "milieu"
+    else:
+        v_pos = "bas"
+    
+    # Combine positions
+    if v_pos == "milieu" and h_pos == "centre":
+        return "centre de l'image"
+    else:
+        return f"{v_pos}-{h_pos} de l'image"
 
 
 def estimate_bbox_from_landmarks(landmarks, img_width, img_height):
@@ -244,12 +291,17 @@ def detect_tool(image: np.ndarray, detection_model, device: torch.device,
     best_tool = tool_detections[np.argmax([t[4] for t in tool_detections])]
     x1, y1, x2, y2, confidence, class_id = best_tool
     
+    # Get tool position in image
+    h, w = image.shape[:2]
+    position = get_position_in_image([x1, y1, x2, y2], w, h)
+    
     # Create detection info dict
     detection = {
         'bbox': [float(x1), float(y1), float(x2), float(y2)],
         'confidence': float(confidence),
         'class_id': int(class_id),
-        'class_name': results.names[int(class_id)]
+        'class_name': results.names[int(class_id)],
+        'position': position
     }
     
     # Crop tool region
@@ -390,6 +442,7 @@ def compute_combined_similarity(pose_sim: float, region_sim: float, pose_weight:
 
 def create_visualization(image1: np.ndarray, image2: np.ndarray, 
                         best_poses: Tuple[dict, dict],
+                        pose_similarity: float,
                         tool_bbox1: Optional[List], tool_bbox2: Optional[List], 
                         filename: str) -> None:
     """
@@ -399,6 +452,7 @@ def create_visualization(image1: np.ndarray, image2: np.ndarray,
         image1: First input image
         image2: Second input image
         best_poses: Tuple of (best_pose1, best_pose2) that match best
+        pose_similarity: Similarity score between poses
         tool_bbox1: Tool bounding box for first image (optional)
         tool_bbox2: Tool bounding box for second image (optional)
         filename: Output file path
@@ -431,7 +485,10 @@ def create_visualization(image1: np.ndarray, image2: np.ndarray,
                             edgecolor='b', 
                             facecolor='none')
         ax1.add_patch(rect)
-        ax1.text(x1, y1-5, "Best Match", color='b', fontsize=10, fontweight='bold')
+        pos_text = best_pose1.get('position', '')
+        score_text = f"Score: {pose_similarity:.2f}"
+        ax1.text(x1, y1-20, f"Position: {pos_text}", color='b', fontsize=9, fontweight='bold')
+        ax1.text(x1, y1-5, score_text, color='b', fontsize=9, fontweight='bold')
     
     if 'bbox' in best_pose2:
         x1, y1, x2, y2 = best_pose2['bbox']
@@ -440,7 +497,10 @@ def create_visualization(image1: np.ndarray, image2: np.ndarray,
                             edgecolor='b', 
                             facecolor='none')
         ax2.add_patch(rect)
-        ax2.text(x1, y1-5, "Best Match", color='b', fontsize=10, fontweight='bold')
+        pos_text = best_pose2.get('position', '')
+        score_text = f"Score: {pose_similarity:.2f}"
+        ax2.text(x1, y1-20, f"Position: {pos_text}", color='b', fontsize=9, fontweight='bold')
+        ax2.text(x1, y1-5, score_text, color='b', fontsize=9, fontweight='bold')
     
     # Plot tool bounding boxes
     if tool_bbox1:
@@ -465,6 +525,10 @@ def create_visualization(image1: np.ndarray, image2: np.ndarray,
     
     # Add timestamp and user info in the figure
     plt.figtext(0.01, 0.01, f"Generated: {CURRENT_TIMESTAMP} | User: {CURRENT_USER}", fontsize=8)
+    
+    # Add overall similarity score at the top
+    plt.figtext(0.5, 0.95, f"Similarity Score: {pose_similarity:.4f}", 
+               fontsize=14, fontweight='bold', ha='center')
     
     # Save figure
     plt.tight_layout()
@@ -558,9 +622,14 @@ def main():
         hand_landmarks1 = []
         hand_landmarks2 = []
     
-    # Report number of people detected
-    print(f"[{CURRENT_TIMESTAMP}] Detected {len(all_poses1)} people in first image")
-    print(f"[{CURRENT_TIMESTAMP}] Detected {len(all_poses2)} people in second image")
+    # Report number of people detected with their positions
+    print(f"[{CURRENT_TIMESTAMP}] Detected {len(all_poses1)} people in first image:")
+    for i, pose in enumerate(all_poses1):
+        print(f"  - Person {i+1}: {pose.get('position', 'Unknown position')}")
+    
+    print(f"[{CURRENT_TIMESTAMP}] Detected {len(all_poses2)} people in second image:")
+    for i, pose in enumerate(all_poses2):
+        print(f"  - Person {i+1}: {pose.get('position', 'Unknown position')}")
     
     if len(all_poses1) == 0 or len(all_poses2) == 0:
         print(f"[{CURRENT_TIMESTAMP}] Error: No people detected in at least one image")
@@ -584,18 +653,24 @@ def main():
     best_similarity = -1
     best_pair = (0, 0)  # indices of best matching poses
     
+    similarity_matrix = []
     for i, feature1 in enumerate(features1):
+        row = []
         for j, feature2 in enumerate(features2):
             similarity = compute_pose_similarity(feature1, feature2, device)
+            row.append(similarity)
             if similarity > best_similarity:
                 best_similarity = similarity
                 best_pair = (i, j)
+        similarity_matrix.append(row)
     
     best_pose1 = all_poses1[best_pair[0]]
     best_pose2 = all_poses2[best_pair[1]]
     
     if len(all_poses1) > 1 or len(all_poses2) > 1:
-        print(f"[{CURRENT_TIMESTAMP}] Best matching poses: Person {best_pair[0]+1} in image 1 and Person {best_pair[1]+1} in image 2")
+        print(f"[{CURRENT_TIMESTAMP}] Best matching poses:")
+        print(f"  - Person {best_pair[0]+1} in image 1 ({best_pose1['position']})")
+        print(f"  - Person {best_pair[1]+1} in image 2 ({best_pose2['position']})")
     
     print(f"[{CURRENT_TIMESTAMP}] Pose similarity: {best_similarity:.4f}")
     
@@ -603,6 +678,12 @@ def main():
     print(f"[{CURRENT_TIMESTAMP}] Detecting tools...")
     tool_detection1, tool_region1 = detect_tool(image1, detection_model, device)
     tool_detection2, tool_region2 = detect_tool(image2, detection_model, device)
+    
+    # Display tool positions if detected
+    if tool_detection1:
+        print(f"[{CURRENT_TIMESTAMP}] Tool detected in image 1: {tool_detection1['class_name']} at {tool_detection1['position']}")
+    if tool_detection2:
+        print(f"[{CURRENT_TIMESTAMP}] Tool detected in image 2: {tool_detection2['class_name']} at {tool_detection2['position']}")
     
     # Handle background comparison if no tool detected
     if tool_region1 is None or tool_region2 is None:
@@ -635,6 +716,7 @@ def main():
     create_visualization(
         image1, image2, 
         (best_pose1, best_pose2),
+        best_similarity,
         tool_bbox1, tool_bbox2, 
         visualization_path
     )
@@ -648,12 +730,24 @@ def main():
         "image1": {
             "path": args.image1,
             "people_detected": len(all_poses1),
-            "best_match_index": best_pair[0]
+            "best_match_index": best_pair[0],
+            "best_match_position": best_pose1.get('position', '')
         },
         "image2": {
             "path": args.image2,
             "people_detected": len(all_poses2),
-            "best_match_index": best_pair[1]
+            "best_match_index": best_pair[1],
+            "best_match_position": best_pose2.get('position', '')
+        },
+        "tool1": {
+            "detected": tool_detection1 is not None,
+            "position": tool_detection1['position'] if tool_detection1 else "",
+            "class": tool_detection1['class_name'] if tool_detection1 else ""
+        },
+        "tool2": {
+            "detected": tool_detection2 is not None,
+            "position": tool_detection2['position'] if tool_detection2 else "",
+            "class": tool_detection2['class_name'] if tool_detection2 else ""
         },
         "metadata": {
             "date": CURRENT_TIMESTAMP,
@@ -677,10 +771,36 @@ def main():
         f.write(f"Date/Time: {CURRENT_TIMESTAMP}\n")
         f.write(f"User: {CURRENT_USER}\n\n")
         f.write(f"Image 1: {args.image1} ({len(all_poses1)} people detected)\n")
-        f.write(f"Image 2: {args.image2} ({len(all_poses2)} people detected)\n\n")
         
-        if len(all_poses1) > 1 or len(all_poses2) > 1:
-            f.write(f"Best Match: Person {best_pair[0]+1} in Image 1 with Person {best_pair[1]+1} in Image 2\n\n")
+        for i, pose in enumerate(all_poses1):
+            f.write(f"  - Person {i+1}: {pose.get('position', '')}")
+            if i == best_pair[0]:
+                f.write(" (BEST MATCH)\n")
+            else:
+                f.write("\n")
+                
+        f.write(f"Image 2: {args.image2} ({len(all_poses2)} people detected)\n")
+        
+        for i, pose in enumerate(all_poses2):
+            f.write(f"  - Person {i+1}: {pose.get('position', '')}")
+            if i == best_pair[1]:
+                f.write(" (BEST MATCH)\n")
+            else:
+                f.write("\n")
+        
+        f.write(f"\nBest Match: Person {best_pair[0]+1} ({best_pose1.get('position', '')}) in Image 1\n")
+        f.write(f"         with Person {best_pair[1]+1} ({best_pose2.get('position', '')}) in Image 2\n\n")
+        
+        f.write(f"Tools:\n")
+        if tool_detection1:
+            f.write(f"  - Image 1: {tool_detection1['class_name']} at {tool_detection1['position']}\n")
+        else:
+            f.write(f"  - Image 1: No tool detected\n")
+            
+        if tool_detection2:
+            f.write(f"  - Image 2: {tool_detection2['class_name']} at {tool_detection2['position']}\n\n")
+        else:
+            f.write(f"  - Image 2: No tool detected\n\n")
         
         f.write(f"Pose Model: {args.model_pose.upper()} {'(YOLOv11)' if args.model_pose == 'yolo' else ''}\n")
         f.write(f"Detection Model: {args.model_detect}\n\n")
